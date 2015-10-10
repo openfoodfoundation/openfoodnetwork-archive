@@ -1,0 +1,5 @@
+/ insert_bottom "[data-hook='s3_settings'] fieldset"
+
+.field
+  = label_tag 'preferences[s3_host_alias]', t(:s3_host_alias)
+  = preference_field_tag 'preferences[s3_host_alias]', Spree::Config[:s3_host_alias], :type => :string
