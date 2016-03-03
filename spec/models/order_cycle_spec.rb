@@ -35,12 +35,14 @@ describe OrderCycle do
     oc_not_yet_open = create(:simple_order_cycle, orders_open_at: 1.week.from_now, orders_close_at: 2.weeks.from_now)
     oc_already_closed = create(:simple_order_cycle, orders_open_at: 2.weeks.ago, orders_close_at: 1.week.ago)
     oc_undated = create(:simple_order_cycle, orders_open_at: nil, orders_close_at: nil)
+    oc_undated_open = create(:simple_order_cycle, orders_open_at: 1.week.ago, orders_close_at: nil)
+    oc_undated_close = create(:simple_order_cycle, orders_open_at: nil, orders_close_at: 1.week.from_now)
 
     OrderCycle.active.should == [oc_active]
     OrderCycle.inactive.should match_array [oc_not_yet_open, oc_already_closed]
     OrderCycle.upcoming.should == [oc_not_yet_open]
     OrderCycle.closed.should == [oc_already_closed]
-    OrderCycle.undated.should == [oc_undated]
+    OrderCycle.undated.should == [oc_undated, oc_undated_open, oc_undated_close]
   end
 
   it "finds order cycles accessible by a user" do
@@ -176,59 +178,84 @@ describe OrderCycle do
   end
 
   describe "product exchanges" do
+    let(:oc) { create(:simple_order_cycle) }
+    let(:d1) { create(:enterprise) }
+    let(:d2) { create(:enterprise) }
+    let!(:e0) { create(:exchange, incoming: true,
+                order_cycle: oc, sender: create(:enterprise), receiver: oc.coordinator) }
+    let!(:e1) { create(:exchange, incoming: false,
+                order_cycle: oc, sender: oc.coordinator, receiver: d1) }
+    let!(:e2) { create(:exchange, incoming: false,
+                order_cycle: oc, sender: oc.coordinator, receiver: d2) }
+    let!(:p0) { create(:simple_product) }
+    let!(:p1) { create(:simple_product) }
+    let!(:p1_v_deleted) { create(:variant, product: p1, deleted_at: Time.zone.now) }
+    let!(:p1_v_visible) { create(:variant, product: p1, inventory_items: [create(:inventory_item, enterprise: d2, visible: true)]) }
+    let!(:p1_v_hidden) { create(:variant, product: p1, inventory_items: [create(:inventory_item, enterprise: d2, visible: false)]) }
+    let!(:p2) { create(:simple_product) }
+    let!(:p2_v) { create(:variant, product: p2) }
+
     before(:each) do
-      @oc = create(:simple_order_cycle)
-
-      @d1 = create(:enterprise)
-      @d2 = create(:enterprise)
-
-      @e0 = create(:exchange, incoming: true,
-                  order_cycle: @oc, sender: create(:enterprise), receiver: @oc.coordinator)
-      @e1 = create(:exchange, incoming: false,
-                  order_cycle: @oc, sender: @oc.coordinator, receiver: @d1)
-      @e2 = create(:exchange, incoming: false,
-                  order_cycle: @oc, sender: @oc.coordinator, receiver: @d2)
-
-      @p0 = create(:simple_product)
-      @p1 = create(:simple_product)
-      @p1_v_deleted = create(:variant, product: @p1, deleted_at: Time.zone.now)
-      @p2 = create(:simple_product)
-      @p2_v = create(:variant, product: @p2)
-
-      @e0.variants << @p0.master
-      @e1.variants << @p1.master
-      @e1.variants << @p2.master
-      @e1.variants << @p2_v
-      @e2.variants << @p1.master
-      @e2.variants << @p1_v_deleted
+      e0.variants << p0.master
+      e1.variants << p1.master
+      e1.variants << p2.master
+      e1.variants << p2_v
+      e2.variants << p1.master
+      e2.variants << p1_v_deleted
+      e2.variants << p1_v_visible
+      e2.variants << p1_v_hidden
     end
 
     it "reports on the variants exchanged" do
-      @oc.variants.should match_array [@p0.master, @p1.master, @p2.master, @p2_v]
+      oc.variants.should match_array [p0.master, p1.master, p2.master, p2_v, p1_v_visible, p1_v_hidden]
     end
 
     it "returns the correct count of variants" do
-      @oc.variants.count.should == 4
+      oc.variants.count.should == 6
     end
 
     it "reports on the variants supplied" do
-      @oc.supplied_variants.should match_array [@p0.master]
+      oc.supplied_variants.should match_array [p0.master]
     end
 
     it "reports on the variants distributed" do
-      @oc.distributed_variants.should match_array [@p1.master, @p2.master, @p2_v]
-    end
-
-    it "reports on the variants distributed by a particular distributor" do
-      @oc.variants_distributed_by(@d2).should == [@p1.master]
+      oc.distributed_variants.should match_array [p1.master, p2.master, p2_v, p1_v_visible, p1_v_hidden]
     end
 
     it "reports on the products distributed by a particular distributor" do
-      @oc.products_distributed_by(@d2).should == [@p1]
+      oc.products_distributed_by(d2).should == [p1]
     end
 
     it "reports on the products exchanged" do
-      @oc.products.should match_array [@p0, @p1, @p2]
+      oc.products.should match_array [p0, p1, p2]
+    end
+
+    context "listing variant distributed by a particular distributor" do
+      context "when default settings are in play" do
+        it "returns an empty list when no distributor is given" do
+          oc.variants_distributed_by(nil).should == []
+        end
+
+        it "returns all variants in the outgoing exchange for the distributor provided" do
+          oc.variants_distributed_by(d2).should include p1.master, p1_v_visible
+          oc.variants_distributed_by(d2).should_not include p1_v_hidden, p1_v_deleted
+          oc.variants_distributed_by(d1).should include p2_v
+        end
+      end
+
+      context "when hub prefers product selection from inventory only" do
+        before do
+          allow(d1).to receive(:prefers_product_selection_from_inventory_only?) { true }
+        end
+
+        it "returns an empty list when no distributor is given" do
+          oc.variants_distributed_by(nil).should == []
+        end
+
+        it "returns only variants in the exchange that are also in the distributor's inventory" do
+          oc.variants_distributed_by(d1).should_not include p2_v
+        end
+      end
     end
   end
 
@@ -356,11 +383,29 @@ describe OrderCycle do
       oc.should_not be_open
       oc.should_not be_closed
     end
+
+    it "reports status when an order cycle is partially dated - opening time only" do
+      oc.update_attributes!(orders_close_at: nil)
+
+      oc.should     be_undated
+      oc.should_not be_upcoming
+      oc.should_not be_open
+      oc.should_not be_closed
+    end
+
+    it "reports status when an order cycle is partially dated - closing time only" do
+      oc.update_attributes!(orders_open_at: nil)
+
+      oc.should     be_undated
+      oc.should_not be_upcoming
+      oc.should_not be_open
+      oc.should_not be_closed
+    end
   end
 
   it "clones itself" do
     coordinator = create(:enterprise);
-    oc = create(:simple_order_cycle, coordinator_fees: [create(:enterprise_fee, enterprise: coordinator)])
+    oc = create(:simple_order_cycle, coordinator_fees: [create(:enterprise_fee, enterprise: coordinator)], preferred_product_selection_from_coordinator_inventory_only: true)
     ex1 = create(:exchange, order_cycle: oc)
     ex2 = create(:exchange, order_cycle: oc)
     oc.clone!
@@ -370,10 +415,12 @@ describe OrderCycle do
     occ.orders_open_at.should be_nil
     occ.orders_close_at.should be_nil
     occ.coordinator.should_not be_nil
+    occ.preferred_product_selection_from_coordinator_inventory_only.should be_true
     occ.coordinator.should == oc.coordinator
 
     occ.coordinator_fee_ids.should_not be_empty
     occ.coordinator_fee_ids.should == oc.coordinator_fee_ids
+    occ.preferred_product_selection_from_coordinator_inventory_only.should == oc.preferred_product_selection_from_coordinator_inventory_only
 
     # to_h gives us a unique hash for each exchange
     # check that the clone has no additional exchanges
